@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="v1.0.3"
+VERSION="v1.0.5"
 
 ### === Configurable Constants === ###
 YOUR_GITHUB_USERNAME="joshgallantt"
@@ -120,7 +120,17 @@ prepare_metadata() {
     exit 1
   fi
 
-  RAW_VERSION=$(ask "Release version (e.g. 1.2.3)")
+  # Run --version and extract semantic version
+  DETECTED_VERSION=""
+  if "$BINARY_PATH" "$DEFAULT_TEST_FLAG" >/dev/null 2>&1; then
+    DETECTED_VERSION=$("$BINARY_PATH" "$DEFAULT_TEST_FLAG" | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+    [[ -n "$DETECTED_VERSION" ]] && info "Detected version from binary: $DETECTED_VERSION"
+  else
+    error "Binary failed to execute with '${DEFAULT_TEST_FLAG}'. Fix it before continuing."
+    exit 1
+  fi
+
+  RAW_VERSION=$(ask "Release version" "$DETECTED_VERSION")
   [[ -n "$RAW_VERSION" ]] || { error "Version cannot be empty."; exit 1; }
 
   if [[ ! "$RAW_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -130,11 +140,8 @@ prepare_metadata() {
 
   VERSION_TAG="v${RAW_VERSION#v}"
 
-  DESCRIPTION=$(ask "Short description (for Homebrew formula only)")
-  if [[ -z "$DESCRIPTION" ]]; then
-    error "Description is required for Homebrew formula."
-    exit 1
-  fi
+  DESCRIPTION=$(ask "Short description (optional, for Homebrew formula)")
+  [[ -z "$DESCRIPTION" ]] && warn "No description provided. Formula will omit it."
 }
 
 tag_version() {
@@ -193,7 +200,7 @@ update_homebrew_tap() {
   info "Writing Homebrew formula to Formula/${FORMULA_FILE}"
   {
     echo "class ${FORMULA_CLASS} < Formula"
-    echo "  desc \"${DESCRIPTION}\""
+    [[ -n "$DESCRIPTION" ]] && echo "  desc \"${DESCRIPTION}\""
     echo "  homepage \"${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}\""
     echo "  url \"${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}/releases/download/${VERSION_TAG}/${TARBALL_NAME}\""
     echo "  sha256 \"${TARBALL_SHA}\""
@@ -220,6 +227,11 @@ update_homebrew_tap() {
 
 ### === Entry Point === ###
 main() {
+  if [[ "${1:-}" == "--version" ]]; then
+    echo "$VERSION"
+    exit 0
+  fi
+
   info "Script Release $VERSION — Safe Script Release Tool"
   require_commands
 
