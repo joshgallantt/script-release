@@ -152,8 +152,13 @@ prepare_metadata() {
     fi
   fi
 
-  DESCRIPTION=$(ask "Short description (optional, for Homebrew formula)")
-  [[ -z "$DESCRIPTION" ]] && warn "No description provided. Formula will omit it."
+  if confirm "Would you like to add a short description for the Homebrew formula?"; then
+    DESCRIPTION=$(ask "Enter short description")
+    [[ -z "$DESCRIPTION" ]] && warn "No description provided. Formula will omit it."
+  else
+    DESCRIPTION=""
+    info "Skipping description."
+  fi
 }
 
 tag_version() {
