@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# releaseScript - Safe interactive release helper for scripts & CLIs
+# Script-Release : Safe interactive release helper for scripts & CLIs
 # © 2025 Josh Gallant – MIT License
 
 set -euo pipefail
 
-VERSION="v1.0.1"
+VERSION="v1.0.3"
 
 ### === Configurable Constants === ###
 YOUR_GITHUB_USERNAME="joshgallantt"
