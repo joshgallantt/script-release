@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="v1.0.5"
+VERSION="v1.0.6"
 
 ### === Configurable Constants === ###
 YOUR_GITHUB_USERNAME="joshgallantt"
@@ -96,7 +96,14 @@ generate_sha256() {
   sha256sum "$1" | awk '{print $1}'
 }
 
-### === Main Release Steps === ###
+tag_exists_remote() {
+  git ls-remote --tags origin "refs/tags/$1" | grep -q "$1"
+}
+
+release_exists_github() {
+  gh release view "$1" >/dev/null 2>&1
+}
+
 prepare_metadata() {
   REPO_NAME=$(get_repo_name)
   validate_kebab_case_filename "$REPO_NAME"
@@ -109,49 +116,47 @@ prepare_metadata() {
 
   if [[ ! -x "$BINARY_PATH" ]]; then
     error "Expected executable './${BINARY_NAME}' not found."
-    echo
     warn "Ensure the file exists, is named '${BINARY_NAME}', and is executable (chmod +x)."
-    echo
     exit 1
   fi
 
   if ! git diff --quiet || ! git diff --cached --quiet; then
-    error "You have uncommitted changes in your working tree. Please commit or stash them before releasing."
+    error "You have uncommitted changes. Please commit or stash before releasing."
     exit 1
   fi
 
-  # Run --version and extract semantic version
-  DETECTED_VERSION=""
-  if "$BINARY_PATH" "$DEFAULT_TEST_FLAG" >/dev/null 2>&1; then
-    DETECTED_VERSION=$("$BINARY_PATH" "$DEFAULT_TEST_FLAG" | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-    [[ -n "$DETECTED_VERSION" ]] && info "Detected version from binary: $DETECTED_VERSION"
-  else
-    error "Binary failed to execute with '${DEFAULT_TEST_FLAG}'. Fix it before continuing."
+  DETECTED_VERSION=$("$BINARY_PATH" "$DEFAULT_TEST_FLAG" 2>/dev/null | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+  if [[ -z "$DETECTED_VERSION" ]]; then
+    error "Unable to detect version from '${BINARY_PATH} ${DEFAULT_TEST_FLAG}'. Script must output a semantic version."
     exit 1
   fi
 
-  RAW_VERSION=$(ask "Release version" "$DETECTED_VERSION")
-  [[ -n "$RAW_VERSION" ]] || { error "Version cannot be empty."; exit 1; }
-
-  if [[ ! "$RAW_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    error "Invalid version format. Use semantic versioning (e.g., 1.2.3 or v1.2.3)"
+  if [[ ! "$DETECTED_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    error "Detected version '$DETECTED_VERSION' is not valid semantic versioning (e.g., 1.2.3 or v1.2.3)"
     exit 1
   fi
 
-  VERSION_TAG="v${RAW_VERSION#v}"
+  VERSION_TAG="v${DETECTED_VERSION#v}"
+  info "Detected version from binary: ${VERSION_TAG}"
+
+  if tag_exists_remote "$VERSION_TAG" || release_exists_github "$VERSION_TAG"; then
+    warn "Version tag ${VERSION_TAG} already exists on remote."
+    if confirm "Do you want to overwrite the existing tag and GitHub release?"; then
+      info "Preparing to overwrite ${VERSION_TAG}..."
+      git tag -d "$VERSION_TAG" 2>/dev/null || true
+      git push --delete origin "$VERSION_TAG" 2>/dev/null || true
+      gh release delete "$VERSION_TAG" --yes 2>/dev/null || true
+    else
+      error "Aborting. Please bump the version in the script and try again."
+      exit 1
+    fi
+  fi
 
   DESCRIPTION=$(ask "Short description (optional, for Homebrew formula)")
   [[ -z "$DESCRIPTION" ]] && warn "No description provided. Formula will omit it."
 }
 
 tag_version() {
-  if git rev-parse "$VERSION_TAG" >/dev/null 2>&1; then
-    warn "Git tag '$VERSION_TAG' already exists."
-    confirm "Delete and recreate it?" || exit 1
-    git tag -d "$VERSION_TAG"
-    git push --delete origin "$VERSION_TAG" || true
-  fi
-
   git tag "$VERSION_TAG"
   git push origin "$VERSION_TAG"
   info "Git tag '$VERSION_TAG' pushed."
