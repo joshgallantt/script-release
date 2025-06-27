@@ -220,7 +220,7 @@ update_homebrew_tap() {
 
 ### === Entry Point === ###
 main() {
-  info "releaseScript $VERSION — Safe Script Release Tool"
+  info "Script Release $VERSION — Safe Script Release Tool"
   require_commands
 
   if ! gh auth status >/dev/null 2>&1; then
