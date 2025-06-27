@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# releaseScript - Safe interactive release helper for scripts & CLIs
+# © 2025 Josh Gallant – MIT License
+
+set -euo pipefail
+
+VERSION="v1.0.0"
+
+### === Configurable Constants === ###
+YOUR_GITHUB_USERNAME="joshgallantt"
+TMPDIR="$(mktemp -d)"
+TAP_REPO="git@github.com:${YOUR_GITHUB_USERNAME}/homebrew-tap.git"
+GITHUB_HOMEPAGE_BASE="https://github.com/${YOUR_GITHUB_USERNAME}"
+DEFAULT_TEST_FLAG="--version"
+
+### === Logging === ###
+info()  { echo -e "\033[1;34m[INFO]\033[0m $*"; }
+warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+error() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; }
+
+confirm() {
+  read -rp "$1 [y/N]: " response
+  [[ "$response" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+ask() {
+  local prompt=$1
+  local default=${2:-}
+  read -rp "$prompt${default:+ [$default]}: " input
+  echo "${input:-$default}"
+}
+
+### === Cleanup === ###
+cleanup() {
+  info "Cleaning up temporary files..."
+  rm -rf "$TMPDIR"
+}
+
+### === Requirements === ###
+require_commands() {
+  for cmd in git gh sha256sum; do
+    command -v "$cmd" >/dev/null || { error "Missing required command: $cmd"; exit 1; }
+  done
+}
+
+get_repo_name() {
+  git rev-parse --show-toplevel >/dev/null || {
+    error "Not inside a Git repository."
+    exit 1
+  }
+  basename "$(git rev-parse --show-toplevel)"
+}
+
+to_pascal_case() {
+  echo "$1" | sed -E 's/[^a-zA-Z0-9]+/ /g' \
+           | awk '{ for (i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2) }1' \
+           | tr -d ' '
+}
+
+to_kebab_case() {
+  echo "$1" | \
+    sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' | \
+    tr '[:upper:]' '[:lower:]'
+}
+
+validate_kebab_case_filename() {
+  local name="$1"
+  if [[ ! "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+    local suggestion
+    suggestion=$(to_kebab_case "$name")
+    error "Binary filename '$name' must be in kebab-case (e.g., my-tool-name)"
+    error "Suggested fix: Rename your repo and file to: '$suggestion'"
+    exit 1
+  fi
+}
+
+detect_license() {
+  for file in LICENSE LICENSE.txt LICENSE.md; do
+    if [[ -f "$file" ]]; then
+      if grep -qi 'MIT License' "$file"; then
+        echo "MIT"
+        return
+      elif grep -qi 'Apache License, Version 2.0' "$file"; then
+        echo "Apache-2.0"
+        return
+      elif grep -qi 'GNU GENERAL PUBLIC LICENSE' "$file"; then
+        grep -qi 'version 3' "$file" && echo "GPL-3.0" && return
+        grep -qi 'version 2' "$file" && echo "GPL-2.0" && return
+      fi
+    fi
+  done
+  echo "MIT"
+}
+
+generate_sha256() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+### === Main Release Steps === ###
+prepare_metadata() {
+  REPO_NAME=$(get_repo_name)
+  validate_kebab_case_filename "$REPO_NAME"
+
+  BINARY_NAME="$REPO_NAME"
+  BINARY_PATH="./$BINARY_NAME"
+  FORMULA_FILE="${BINARY_NAME}.rb"
+  FORMULA_CLASS=$(to_pascal_case "$BINARY_NAME")
+
+  [[ -f "$BINARY_PATH" ]] || { error "File not found: $BINARY_PATH"; exit 1; }
+
+  RAW_VERSION=$(ask "Release version (e.g. 1.2.3)")
+  [[ -n "$RAW_VERSION" ]] || { error "Version cannot be empty."; exit 1; }
+  VERSION_TAG="v${RAW_VERSION#v}"
+
+  DESCRIPTION=$(ask "Short description (for Homebrew formula only)")
+  if [[ -z "$DESCRIPTION" ]]; then
+    DESCRIPTION="${BINARY_NAME} ${VERSION_TAG}"
+  fi
+}
+
+tag_version() {
+  if git rev-parse "$VERSION_TAG" >/dev/null 2>&1; then
+    warn "Git tag '$VERSION_TAG' already exists."
+    confirm "Delete and recreate it?" || exit 1
+    git tag -d "$VERSION_TAG"
+  fi
+
+  git tag "$VERSION_TAG"
+  git push origin "$VERSION_TAG"
+  info "Git tag '$VERSION_TAG' pushed."
+}
+
+package_binary() {
+  info "Packaging script..."
+  chmod +x "$BINARY_PATH"
+
+  PKG_DIR="$TMPDIR/package"
+  mkdir -p "$PKG_DIR"
+
+  TARBALL="$PKG_DIR/${BINARY_NAME}-${VERSION_TAG}.tar.gz"
+  tar -czf "$TARBALL" -C "$(dirname "$BINARY_PATH")" "$(basename "$BINARY_PATH")"
+  TARBALL_NAME=$(basename "$TARBALL")
+  TARBALL_SHA=$(generate_sha256 "$TARBALL")
+  info "Packaged: $TARBALL"
+}
+
+create_github_release() {
+  info "Creating GitHub release..."
+  gh release create "$VERSION_TAG" "$TARBALL" --title "$VERSION_TAG"
+}
+
+update_homebrew_tap() {
+  info "Cloning Homebrew tap..."
+  git clone "$TAP_REPO" "$TMPDIR/tap"
+
+  FORMULA_DIR="$TMPDIR/tap/Formula"
+  mkdir -p "$FORMULA_DIR"
+  FORMULA_PATH="$FORMULA_DIR/$FORMULA_FILE"
+
+  if [[ -f "$FORMULA_PATH" ]]; then
+    warn "Formula file already exists: Formula/${FORMULA_FILE}"
+    confirm "Overwrite existing formula file?" || exit 1
+  fi
+
+  LICENSE_TYPE=$(detect_license)
+  info "Detected license: ${LICENSE_TYPE}"
+
+  info "Writing Homebrew formula to Formula/${FORMULA_FILE}"
+  cat > "$FORMULA_PATH" <<EOF
+class ${FORMULA_CLASS} < Formula
+  desc "${DESCRIPTION}"
+  homepage "${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}"
+  url "${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}/releases/download/${VERSION_TAG}/${TARBALL_NAME}"
+  sha256 "${TARBALL_SHA}"
+  license "${LICENSE_TYPE}"
+
+  def install
+    bin.install "${BINARY_NAME}"
+  end
+
+  test do
+    system "#{bin}/${BINARY_NAME}", "${DEFAULT_TEST_FLAG}"
+  end
+end
+EOF
+
+  pushd "$TMPDIR/tap" >/dev/null
+  git add "Formula/${FORMULA_FILE}"
+  git commit -m "Update ${BINARY_NAME} to ${VERSION_TAG}"
+  git push
+  popd >/dev/null
+
+  info "Homebrew formula updated: Formula/${FORMULA_FILE}"
+}
+
+### === Entry Point === ###
+main() {
+  info "releaseScript $VERSION — Safe Script Release Tool"
+  require_commands
+  DEFAULT_LICENSE=$(detect_license)
+  prepare_metadata
+  tag_version
+  package_binary
+  create_github_release
+  update_homebrew_tap
+  cleanup
+  info "✅ Release ${VERSION_TAG} completed successfully."
+}
+
+main "$@"
