@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="v1.0.0"
+VERSION="v1.0.1"
 
 ### === Configurable Constants === ###
 YOUR_GITHUB_USERNAME="joshgallantt"
@@ -89,7 +89,7 @@ detect_license() {
       fi
     fi
   done
-  echo "MIT"
+  echo "UNKNOWN"
 }
 
 generate_sha256() {
@@ -100,21 +100,40 @@ generate_sha256() {
 prepare_metadata() {
   REPO_NAME=$(get_repo_name)
   validate_kebab_case_filename "$REPO_NAME"
+  info "🚀 Starting release for ${REPO_NAME}..."
 
   BINARY_NAME="$REPO_NAME"
   BINARY_PATH="./$BINARY_NAME"
   FORMULA_FILE="${BINARY_NAME}.rb"
   FORMULA_CLASS=$(to_pascal_case "$BINARY_NAME")
 
-  [[ -f "$BINARY_PATH" ]] || { error "File not found: $BINARY_PATH"; exit 1; }
+  if [[ ! -x "$BINARY_PATH" ]]; then
+    error "Expected executable './${BINARY_NAME}' not found."
+    echo
+    warn "Ensure the file exists, is named '${BINARY_NAME}', and is executable (chmod +x)."
+    echo
+    exit 1
+  fi
+
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    error "You have uncommitted changes in your working tree. Please commit or stash them before releasing."
+    exit 1
+  fi
 
   RAW_VERSION=$(ask "Release version (e.g. 1.2.3)")
   [[ -n "$RAW_VERSION" ]] || { error "Version cannot be empty."; exit 1; }
+
+  if [[ ! "$RAW_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    error "Invalid version format. Use semantic versioning (e.g., 1.2.3 or v1.2.3)"
+    exit 1
+  fi
+
   VERSION_TAG="v${RAW_VERSION#v}"
 
   DESCRIPTION=$(ask "Short description (for Homebrew formula only)")
   if [[ -z "$DESCRIPTION" ]]; then
-    DESCRIPTION="${BINARY_NAME} ${VERSION_TAG}"
+    error "Description is required for Homebrew formula."
+    exit 1
   fi
 }
 
@@ -123,6 +142,7 @@ tag_version() {
     warn "Git tag '$VERSION_TAG' already exists."
     confirm "Delete and recreate it?" || exit 1
     git tag -d "$VERSION_TAG"
+    git push --delete origin "$VERSION_TAG" || true
   fi
 
   git tag "$VERSION_TAG"
@@ -162,32 +182,37 @@ update_homebrew_tap() {
     confirm "Overwrite existing formula file?" || exit 1
   fi
 
+  if ! "$BINARY_PATH" "$DEFAULT_TEST_FLAG" >/dev/null 2>&1; then
+    warn "The test command '${DEFAULT_TEST_FLAG}' failed for '${BINARY_PATH}'"
+    confirm "Continue anyway and write formula with this test?" || exit 1
+  fi
+
   LICENSE_TYPE=$(detect_license)
-  info "Detected license: ${LICENSE_TYPE}"
+  [[ "$LICENSE_TYPE" != "UNKNOWN" ]] && info "Detected license: ${LICENSE_TYPE}"
 
   info "Writing Homebrew formula to Formula/${FORMULA_FILE}"
-  cat > "$FORMULA_PATH" <<EOF
-class ${FORMULA_CLASS} < Formula
-  desc "${DESCRIPTION}"
-  homepage "${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}"
-  url "${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}/releases/download/${VERSION_TAG}/${TARBALL_NAME}"
-  sha256 "${TARBALL_SHA}"
-  license "${LICENSE_TYPE}"
-
-  def install
-    bin.install "${BINARY_NAME}"
-  end
-
-  test do
-    system "#{bin}/${BINARY_NAME}", "${DEFAULT_TEST_FLAG}"
-  end
-end
-EOF
+  {
+    echo "class ${FORMULA_CLASS} < Formula"
+    echo "  desc \"${DESCRIPTION}\""
+    echo "  homepage \"${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}\""
+    echo "  url \"${GITHUB_HOMEPAGE_BASE}/${REPO_NAME}/releases/download/${VERSION_TAG}/${TARBALL_NAME}\""
+    echo "  sha256 \"${TARBALL_SHA}\""
+    [[ "$LICENSE_TYPE" != "UNKNOWN" ]] && echo "  license \"${LICENSE_TYPE}\""
+    echo
+    echo "  def install"
+    echo "    bin.install \"${BINARY_NAME}\""
+    echo "  end"
+    echo
+    echo "  test do"
+    echo "    system \"\#{bin}/${BINARY_NAME}\", \"${DEFAULT_TEST_FLAG}\""
+    echo "  end"
+    echo "end"
+  } > "$FORMULA_PATH"
 
   pushd "$TMPDIR/tap" >/dev/null
   git add "Formula/${FORMULA_FILE}"
   git commit -m "Update ${BINARY_NAME} to ${VERSION_TAG}"
-  git push
+  git push || { error "Failed to push Homebrew formula."; exit 1; }
   popd >/dev/null
 
   info "Homebrew formula updated: Formula/${FORMULA_FILE}"
@@ -197,7 +222,12 @@ EOF
 main() {
   info "releaseScript $VERSION — Safe Script Release Tool"
   require_commands
-  DEFAULT_LICENSE=$(detect_license)
+
+  if ! gh auth status >/dev/null 2>&1; then
+    error "GitHub CLI is not authenticated. Run 'gh auth login' before using this script."
+    exit 1
+  fi
+
   prepare_metadata
   tag_version
   package_binary
